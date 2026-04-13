@@ -1,4 +1,6 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+import { resolveApiBase } from './apiBase'
+
+const API_BASE = resolveApiBase()
 
 function postTelemetry(path, payload) {
   const body = JSON.stringify({

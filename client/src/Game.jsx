@@ -5,8 +5,9 @@ import Hud from './components/Hud'
 import TutorialPage from './components/TutorialPage'
 import SettingsPage from './components/SettingsPage'
 import { trackEvent } from './lib/telemetry'
+import { resolveApiBase } from './lib/apiBase'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+const API_BASE = resolveApiBase()
 
 const TUNING = {
   difficultyBands: [
@@ -382,11 +383,16 @@ async function fetchLeaderboardPage({ page = 1, limit = 10, name = '' } = {}) {
 }
 
 async function saveScore(payload) {
-  const response = await fetch(`${API_BASE}/scores`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
+  let response
+  try {
+    response = await fetch(`${API_BASE}/scores`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  } catch {
+    throw new Error('Cannot reach leaderboard server. Please try again in a few seconds.')
+  }
 
   if (!response.ok) {
     let message = 'Could not save score'
