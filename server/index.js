@@ -10,10 +10,39 @@ const app = express()
 const PORT = process.env.PORT || 5000
 const MONGO_URI = process.env.MONGO_URI || ''
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || '*'
+const allowedOrigins = CLIENT_ORIGIN.split(',')
+  .map((value) => value.trim())
+  .filter(Boolean)
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) {
+    return true
+  }
+
+  if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+    return true
+  }
+
+  if (/^https:\/\/[\w-]+\.vercel\.app$/.test(origin)) {
+    return true
+  }
+
+  if (/^http:\/\/localhost:\d+$/.test(origin) || /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
+    return true
+  }
+
+  return false
+}
 
 app.use(
   cors({
-    origin: CLIENT_ORIGIN === '*' ? true : CLIENT_ORIGIN,
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true)
+        return
+      }
+      callback(new Error(`CORS blocked for origin: ${origin}`))
+    },
   }),
 )
 app.use(express.json())
