@@ -4,10 +4,13 @@ export default function GameOverScreen({
   score,
   outcome,
   duration,
+  reason,
   onRestart,
   onBack,
   onSaveScore,
   leaderboard,
+  leaderboardInfo,
+  onPageChange,
 }) {
   const [name, setName] = useState('')
   const [saving, setSaving] = useState(false)
@@ -34,7 +37,12 @@ export default function GameOverScreen({
   const subtitle =
     outcome === 'win'
       ? 'Impossible. The target gave up first.'
-      : 'You almost had it. Which is exactly the point.'
+      : reason || 'You almost had it. Which is exactly the point.'
+
+  const page = leaderboardInfo?.page || 1
+  const limit = leaderboardInfo?.limit || 10
+  const total = leaderboardInfo?.total || leaderboard.length
+  const totalPages = Math.max(1, Math.ceil(total / limit))
 
   return (
     <section className="mx-auto flex min-h-screen w-full max-w-6xl items-center justify-center px-4 py-6 sm:px-8">
@@ -89,6 +97,9 @@ export default function GameOverScreen({
 
         <aside className="panel-glow rounded-3xl border border-fuchsia-400/30 bg-slate-950/70 p-6 md:col-span-2 sm:p-8">
           <h3 className="font-arcade text-xl text-fuchsia-100">Top 10</h3>
+          {leaderboardInfo?.playerRank ? (
+            <p className="mt-2 text-xs text-cyan-200">Your best rank: #{leaderboardInfo.playerRank}</p>
+          ) : null}
           <ol className="mt-4 space-y-2 text-sm text-slate-300">
             {leaderboard.length === 0 && <li>No scores yet.</li>}
             {leaderboard.map((entry, index) => (
@@ -97,12 +108,34 @@ export default function GameOverScreen({
                 className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2"
               >
                 <span>
-                  {index + 1}. {entry.name}
+                  {(page - 1) * limit + index + 1}. {entry.name}
                 </span>
                 <span className="font-arcade text-cyan-200">{entry.score}</span>
               </li>
             ))}
           </ol>
+
+          <div className="mt-4 flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => onPageChange(page - 1)}
+              disabled={page <= 1}
+              className="rounded-lg border border-slate-600 bg-slate-900/70 px-3 py-2 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Prev
+            </button>
+            <p className="text-xs text-slate-400">
+              Page {page} / {totalPages}
+            </p>
+            <button
+              type="button"
+              onClick={() => onPageChange(page + 1)}
+              disabled={page >= totalPages}
+              className="rounded-lg border border-slate-600 bg-slate-900/70 px-3 py-2 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
         </aside>
       </div>
     </section>

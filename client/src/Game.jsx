@@ -2,16 +2,117 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import MainMenu from './components/MainMenu'
 import GameOverScreen from './components/GameOverScreen'
 import Hud from './components/Hud'
+import TutorialPage from './components/TutorialPage'
+import SettingsPage from './components/SettingsPage'
+import { trackEvent } from './lib/telemetry'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+
+const TUNING = {
+  difficultyBands: [
+    {
+      until: 30,
+      label: 'Warmup',
+      difficultyMultiplier: 1,
+      flipIntervalScale: 1.15,
+      goalSpeedScale: 0.95,
+      shardChance: 0.08,
+      riftIntervalScale: 1.1,
+      wallLimitScale: 1,
+      nearWinDistance: 120,
+      slowMoFactor: 0.6,
+    },
+    {
+      until: 60,
+      label: 'Pressure',
+      difficultyMultiplier: 1.15,
+      flipIntervalScale: 0.9,
+      goalSpeedScale: 1.08,
+      shardChance: 0.07,
+      riftIntervalScale: 0.95,
+      wallLimitScale: 0.92,
+      nearWinDistance: 132,
+      slowMoFactor: 0.5,
+    },
+    {
+      until: Infinity,
+      label: 'Overdrive',
+      difficultyMultiplier: 1.35,
+      flipIntervalScale: 0.78,
+      goalSpeedScale: 1.18,
+      shardChance: 0.05,
+      riftIntervalScale: 0.82,
+      wallLimitScale: 0.8,
+      nearWinDistance: 145,
+      slowMoFactor: 0.42,
+    },
+  ],
+  audio: {
+    ambientBaseGain: 0.02,
+    ambientTensionGain: 0.018,
+    ambientVolumeScale: 0.9,
+    tensionMaxDistance: 260,
+    tensionNearGain: 0.16,
+  },
+  feedback: {
+    chromaticFlashDecay: 1.6,
+    chromaticFlashNearGoal: 0.52,
+    chromaticFlashWallHit: 0.34,
+    nearWinSlowMoDuration: 0.6,
+    wallHitFlashDuration: 0.22,
+  },
+  gameplay: {
+    scorePerSecondBase: 10,
+    scorePerSecondDifficulty: 2,
+    shardPoints: 45,
+    goalBonusPoints: 250,
+    maxCombo: 8,
+    maxRifts: 2,
+    maxShards: 4,
+  },
+}
+
+const GAME_MODES = {
+  classic: {
+    label: 'Classic',
+    flipFactor: 1,
+    fakeWinChance: 0.42,
+    wallLimit: 2.9,
+    goalSpeedFactor: 1,
+  },
+  chaos: {
+    label: 'Chaos',
+    flipFactor: 1.3,
+    fakeWinChance: 0.55,
+    wallLimit: 3,
+    goalSpeedFactor: 1.15,
+  },
+  hardcore: {
+    label: 'Hardcore',
+    flipFactor: 1.45,
+    fakeWinChance: 0.28,
+    wallLimit: 2.2,
+    goalSpeedFactor: 1.2,
+  },
+}
+
+const DEFAULT_SETTINGS = {
+  mode: 'classic',
+  volume: 70,
+  effects: 100,
+  sensitivity: 100,
+}
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 
 const rand = (min, max) => Math.random() * (max - min) + min
 
-const initialEngine = (width, height) => ({
+const getDifficultyBand = (duration) => TUNING.difficultyBands.find((band) => duration < band.until) || TUNING.difficultyBands[TUNING.difficultyBands.length - 1]
+
+const initialEngine = (width, height, mode = 'classic') => ({
   width,
   height,
+  mode,
   player: { x: width * 0.2, y: height * 0.5, radius: 14, speed: 250, trailTick: 0 },
   goal: { x: width * 0.8, y: height * 0.5, radius: 18, speed: 205 },
   shards: [],
@@ -34,20 +135,102 @@ const initialEngine = (width, height) => ({
   isGameOver: false,
   outcome: 'lose',
   fakeUiFlash: 0,
+  chromaticFlash: 0,
   dashCooldown: 0,
   dashBurst: 0,
-  audioUnlocked: false,
+  slowMoTimer: 0,
+  slowMoScale: 1,
+  nearWinLock: 0,
   soundEnabled: true,
   mission: 0,
 })
 
-function createAudioEngine() {
+function createAudioEngine(getVolume = () => 1) {
   const AudioCtx = window.AudioContext || window.webkitAudioContext
   if (!AudioCtx) {
     return
   }
 
   const audio = new AudioCtx()
+  let ambientStarted = false
+  let ambientNodes = null
+
+  const ensureAmbient = () => {
+    if (ambientStarted) {
+      return ambientNodes
+    }
+
+    const ambientFilter = audio.createBiquadFilter()
+    ambientFilter.type = 'lowpass'
+    ambientFilter.frequency.value = 220
+    ambientFilter.Q.value = 0.8
+
+    const ambientGain = audio.createGain()
+    ambientGain.gain.value = 0
+
+    const tensionFilter = audio.createBiquadFilter()
+    tensionFilter.type = 'bandpass'
+    tensionFilter.frequency.value = 420
+    tensionFilter.Q.value = 4
+
+    const tensionGain = audio.createGain()
+    tensionGain.gain.value = 0
+
+    const ambientOscA = audio.createOscillator()
+    ambientOscA.type = 'sine'
+    ambientOscA.frequency.value = 55
+
+    const ambientOscB = audio.createOscillator()
+    ambientOscB.type = 'triangle'
+    ambientOscB.frequency.value = 110
+
+    const tensionOsc = audio.createOscillator()
+    tensionOsc.type = 'sawtooth'
+    tensionOsc.frequency.value = 88
+
+    ambientOscA.connect(ambientFilter)
+    ambientOscB.connect(ambientFilter)
+    ambientFilter.connect(ambientGain)
+    ambientGain.connect(audio.destination)
+
+    tensionOsc.connect(tensionFilter)
+    tensionFilter.connect(tensionGain)
+    tensionGain.connect(audio.destination)
+
+    ambientOscA.start()
+    ambientOscB.start()
+    tensionOsc.start()
+
+    ambientStarted = true
+    ambientNodes = {
+      ambientGain,
+      ambientFilter,
+      ambientOscA,
+      ambientOscB,
+      tensionGain,
+      tensionFilter,
+      tensionOsc,
+    }
+
+    return ambientNodes
+  }
+
+  const updateLayers = ({ intensity = 0, tension = 0 }) => {
+    const nodes = ensureAmbient()
+    if (!nodes) {
+      return
+    }
+
+    const volumeScale = getVolume() * TUNING.audio.ambientVolumeScale
+    const ambientGainTarget = TUNING.audio.ambientBaseGain * volumeScale
+    const tensionGainTarget = Math.min(TUNING.audio.ambientTensionGain + tension * TUNING.audio.tensionNearGain, 0.22) * volumeScale
+
+    nodes.ambientGain.gain.setTargetAtTime(ambientGainTarget, audio.currentTime, 0.04)
+    nodes.tensionGain.gain.setTargetAtTime(tensionGainTarget, audio.currentTime, 0.03)
+    nodes.ambientFilter.frequency.setTargetAtTime(180 + intensity * 220, audio.currentTime, 0.04)
+    nodes.tensionFilter.frequency.setTargetAtTime(360 + tension * 600, audio.currentTime, 0.04)
+    nodes.tensionOsc.frequency.setTargetAtTime(72 + tension * 70, audio.currentTime, 0.03)
+  }
 
   const trigger = (type = 'square', frequency = 440, duration = 0.06, gainValue = 0.02, glide = 0) => {
     const oscillator = audio.createOscillator()
@@ -58,7 +241,7 @@ function createAudioEngine() {
     if (glide !== 0) {
       oscillator.frequency.exponentialRampToValueAtTime(Math.max(50, frequency + glide), audio.currentTime + duration)
     }
-    gain.gain.value = gainValue
+    gain.gain.value = gainValue * getVolume()
 
     oscillator.connect(gain)
     gain.connect(audio.destination)
@@ -78,7 +261,7 @@ function createAudioEngine() {
     const source = audio.createBufferSource()
     const gain = audio.createGain()
     source.buffer = buffer
-    gain.gain.value = gainValue
+    gain.gain.value = gainValue * getVolume()
     source.connect(gain)
     gain.connect(audio.destination)
     source.start()
@@ -90,6 +273,7 @@ function createAudioEngine() {
     audio,
     trigger,
     noiseBurst,
+    updateLayers,
     unlock: async () => {
       if (audio.state !== 'running') {
         await audio.resume()
@@ -159,7 +343,42 @@ async function fetchLeaderboard() {
   if (!response.ok) {
     throw new Error('Could not fetch leaderboard')
   }
-  return response.json()
+  const payload = await response.json()
+  if (Array.isArray(payload)) {
+    return {
+      items: payload,
+      total: payload.length,
+      page: 1,
+      limit: payload.length || 10,
+      playerRank: null,
+    }
+  }
+  return payload
+}
+
+async function fetchLeaderboardPage({ page = 1, limit = 10, name = '' } = {}) {
+  const params = new URLSearchParams({
+    page: String(page),
+    limit: String(limit),
+  })
+
+  if (name) {
+    params.set('name', name)
+  }
+
+  const response = await fetch(`${API_BASE}/scores?${params.toString()}`)
+  if (!response.ok) {
+    throw new Error('Could not fetch leaderboard')
+  }
+
+  const payload = await response.json()
+  return {
+    items: payload.items || [],
+    total: payload.total || 0,
+    page: payload.page || page,
+    limit: payload.limit || limit,
+    playerRank: payload.playerRank ?? null,
+  }
 }
 
 async function saveScore(payload) {
@@ -182,6 +401,9 @@ export default function Game() {
   const keysRef = useRef({})
   const engineRef = useRef(null)
   const audioRef = useRef(null)
+  const settingsRef = useRef(DEFAULT_SETTINGS)
+  const hasTrackedSessionRef = useRef(false)
+  const leaderboardLimitRef = useRef(10)
 
   const [screen, setScreen] = useState('menu')
   const [hud, setHud] = useState({
@@ -196,6 +418,8 @@ export default function Game() {
     shardCount: 0,
     combo: 1,
     riftCount: 0,
+    wallHits: 0,
+    wallLimit: 1,
     progress: 0,
     playerX: 0,
     playerY: 0,
@@ -204,11 +428,25 @@ export default function Game() {
     fieldWidth: 1,
     fieldHeight: 1,
   })
-  const [runResult, setRunResult] = useState({ score: 0, duration: 0, outcome: 'lose' })
+  const [runResult, setRunResult] = useState({ score: 0, duration: 0, outcome: 'lose', reason: '' })
   const [leaderboard, setLeaderboard] = useState([])
+  const [leaderboardInfo, setLeaderboardInfo] = useState({
+    total: 0,
+    page: 1,
+    limit: 10,
+    playerRank: null,
+  })
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS)
+  const [settingsBackTarget, setSettingsBackTarget] = useState('menu')
+  const [settingsBackPause, setSettingsBackPause] = useState(false)
   const [pause, setPause] = useState(false)
   const [fakeOverlay, setFakeOverlay] = useState('')
   const [quitNotice, setQuitNotice] = useState('')
+  const [showTouchControls, setShowTouchControls] = useState(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(max-width: 900px)').matches : false,
+  )
+  const [joystickVector, setJoystickVector] = useState({ x: 0, y: 0 })
+  const joystickRef = useRef({ active: false, originX: 0, originY: 0, x: 0, y: 0 })
 
   const bgGradient = useMemo(
     () => ['#050611', '#080f26', '#101033', '#180c2b'],
@@ -216,9 +454,47 @@ export default function Game() {
   )
 
   useEffect(() => {
-    audioRef.current = createAudioEngine()
+    settingsRef.current = settings
+  }, [settings])
 
-    fetchLeaderboard().then(setLeaderboard).catch(() => undefined)
+  useEffect(() => {
+    leaderboardLimitRef.current = leaderboardInfo.limit || 10
+  }, [leaderboardInfo.limit])
+
+  useEffect(() => {
+    if (!hasTrackedSessionRef.current) {
+      hasTrackedSessionRef.current = true
+      trackEvent('session_start', {
+        mode: settingsRef.current.mode,
+        viewport: `${window.innerWidth}x${window.innerHeight}`,
+        platform: navigator.platform,
+      })
+    }
+
+    audioRef.current = createAudioEngine(() => settingsRef.current.volume / 100)
+
+    fetchLeaderboard()
+      .then((data) => {
+        setLeaderboard(data.items || [])
+        setLeaderboardInfo({
+          total: data.total || 0,
+          page: data.page || 1,
+          limit: data.limit || 10,
+          playerRank: data.playerRank ?? null,
+        })
+      })
+      .catch(() => undefined)
+
+    const mediaQuery = window.matchMedia('(max-width: 900px)')
+    const onMediaChange = (event) => {
+      setShowTouchControls(event.matches)
+    }
+
+    mediaQuery.addEventListener('change', onMediaChange)
+
+    return () => {
+      mediaQuery.removeEventListener('change', onMediaChange)
+    }
   }, [])
 
   useEffect(() => {
@@ -259,7 +535,7 @@ export default function Game() {
     const ctx = canvas.getContext('2d')
     const size = resizeCanvas(canvas)
 
-    const engine = initialEngine(size.width, size.height)
+    const engine = initialEngine(size.width, size.height, settingsRef.current.mode)
     engineRef.current = engine
 
     const audio = audioRef.current
@@ -289,12 +565,28 @@ export default function Game() {
     let previous = performance.now()
 
     const endGame = (outcome) => {
+      const reason =
+        outcome === 'lose'
+          ? 'Too many wall collisions. Time only raises difficulty, and move count does not end the run.'
+          : ''
       engine.isGameOver = true
       engine.outcome = outcome
-      setRunResult({ score: engine.score, duration: engine.duration, outcome })
+      setRunResult({ score: engine.score, duration: engine.duration, outcome, reason })
       setScreen('end')
       setPause(false)
-      fetchLeaderboard().then(setLeaderboard).catch(() => undefined)
+      trackEvent('game_over', {
+        outcome,
+        score: Math.floor(engine.score),
+        duration: Number(engine.duration.toFixed(2)),
+        mode: engine.mode,
+        wallHits: Number(engine.wallHits.toFixed(2)),
+      })
+      fetchLeaderboardPage({ page: 1, limit: leaderboardLimitRef.current })
+        .then((data) => {
+          setLeaderboard(data.items)
+          setLeaderboardInfo(data)
+        })
+        .catch(() => undefined)
       playSound(outcome === 'win' ? 'triangle' : 'sawtooth', outcome === 'win' ? 720 : 180, 0.12, 0.04)
     }
 
@@ -318,26 +610,35 @@ export default function Game() {
       previous = time
 
       if (!pause && !engine.isGameOver) {
+        const currentSettings = settingsRef.current
+        const modeConfig = GAME_MODES[engine.mode] || GAME_MODES.classic
+        const band = getDifficultyBand(engine.duration)
+        const effectsScale = clamp(currentSettings.effects / 100, 0.2, 1.5)
+        const sensitivityScale = clamp(currentSettings.sensitivity / 100, 0.5, 1.6)
+        const timeScale = engine.slowMoTimer > 0 ? engine.slowMoScale : 1
+        const scaledDt = dt * timeScale
+
         engine.duration += dt
-        engine.comboTimer = Math.max(0, engine.comboTimer - dt)
+        engine.comboTimer = Math.max(0, engine.comboTimer - scaledDt)
         if (engine.comboTimer === 0) {
           engine.combo = 1
         }
-        engine.combo = clamp(engine.combo, 1, 8)
+        engine.combo = clamp(engine.combo, 1, TUNING.gameplay.maxCombo)
         engine.comboBest = Math.max(engine.comboBest, engine.combo)
 
         const comboMultiplier = 1 + (engine.combo - 1) * 0.25
-        engine.score += dt * (10 + engine.difficulty * 2) * comboMultiplier
-        engine.difficulty = 1 + engine.duration * 0.04
-        engine.dashCooldown = Math.max(0, engine.dashCooldown - dt)
-        engine.dashBurst = Math.max(0, engine.dashBurst - dt * 3)
+        engine.score += scaledDt * (TUNING.gameplay.scorePerSecondBase + engine.difficulty * TUNING.gameplay.scorePerSecondDifficulty) * comboMultiplier
+        engine.difficulty = 1 + engine.duration * 0.04 * modeConfig.flipFactor * band.difficultyMultiplier
+        engine.dashCooldown = Math.max(0, engine.dashCooldown - scaledDt)
+        engine.dashBurst = Math.max(0, engine.dashBurst - scaledDt * 3)
+        engine.nearWinLock = Math.max(0, engine.nearWinLock - dt)
 
         if (engine.duration >= engine.nextRiftAt) {
           spawnRift(engine)
-          engine.nextRiftAt += rand(8, 14) / engine.difficulty
+          engine.nextRiftAt += rand(8, 14) / (engine.difficulty * modeConfig.flipFactor * band.riftIntervalScale)
         }
 
-        if (Math.random() > 0.92) {
+        if (Math.random() > 1 - band.shardChance) {
           spawnShard()
         }
 
@@ -354,12 +655,13 @@ export default function Game() {
 
           if (dashX !== 0 || dashY !== 0) {
             const dashMag = Math.hypot(dashX, dashY) || 1
-            engine.player.x += (dashX / dashMag) * 120
-            engine.player.y += (dashY / dashMag) * 120
+            engine.player.x += (dashX / dashMag) * 120 * sensitivityScale
+            engine.player.y += (dashY / dashMag) * 120 * sensitivityScale
             engine.dashCooldown = 1.9
             engine.dashBurst = 1.2
             engine.warning = 'Turbo dash triggered!'
-            engine.screenShake = 16
+            engine.screenShake = 16 * effectsScale
+            engine.chromaticFlash = Math.max(engine.chromaticFlash, TUNING.feedback.chromaticFlashWallHit)
             playSound('square', 160, 0.08, 0.03)
             playNoise(0.04, 0.01)
             keysRef.current[' '] = false
@@ -368,9 +670,9 @@ export default function Game() {
 
         if (engine.duration >= engine.nextFlipAt) {
           engine.controlsFlipped = !engine.controlsFlipped
-          engine.nextFlipAt += rand(5, 10) / engine.difficulty
+          engine.nextFlipAt += rand(5, 10) / (engine.difficulty * modeConfig.flipFactor * band.flipIntervalScale)
           engine.warning = engine.controlsFlipped ? 'Controls Flipped!' : 'Controls stabilized... for now.'
-          engine.screenShake = 14
+          engine.screenShake = 14 * effectsScale
           playSound('square', engine.controlsFlipped ? 220 : 540, 0.06, 0.03)
           playNoise(0.03, 0.006)
         }
@@ -390,12 +692,12 @@ export default function Game() {
         }
 
         const mag = Math.hypot(dx, dy) || 1
-        const speed = engine.player.speed * engine.difficulty
+        const speed = engine.player.speed * engine.difficulty * sensitivityScale
         const dashMultiplier = engine.dashBurst > 0 ? 1.4 : 1
-        engine.player.x += (dx / mag) * speed * dt
-        engine.player.y += (dy / mag) * speed * dt
-        engine.player.x += (dx / mag) * speed * dt * (dashMultiplier - 1)
-        engine.player.y += (dy / mag) * speed * dt * (dashMultiplier - 1)
+        engine.player.x += (dx / mag) * speed * scaledDt
+        engine.player.y += (dy / mag) * speed * scaledDt
+        engine.player.x += (dx / mag) * speed * scaledDt * (dashMultiplier - 1)
+        engine.player.y += (dy / mag) * speed * scaledDt * (dashMultiplier - 1)
 
         if (dx !== 0 || dy !== 0) {
           engine.player.trailTick += dt
@@ -411,12 +713,13 @@ export default function Game() {
         if (hitWallX || hitWallY) {
           engine.player.x = clamp(engine.player.x, engine.player.radius, engine.width - engine.player.radius)
           engine.player.y = clamp(engine.player.y, engine.player.radius, engine.height - engine.player.radius)
-          engine.wallHits += dt * 4
-          engine.screenShake = 18
+          engine.wallHits += scaledDt * 4
+          engine.screenShake = 18 * effectsScale
           engine.warning = 'Wall collision! Keep control!'
+          engine.chromaticFlash = Math.max(engine.chromaticFlash, TUNING.feedback.chromaticFlashWallHit)
 
           if (Math.random() > 0.85) {
-            engine.fakeUiFlash = 0.2
+            engine.fakeUiFlash = TUNING.feedback.wallHitFlashDuration * effectsScale
           }
 
           playSound('sawtooth', 140, 0.05, 0.02)
@@ -430,7 +733,7 @@ export default function Game() {
         const dist = Math.hypot(toGoalX, toGoalY)
 
         if (dist < 150) {
-          const escape = ((engine.goal.speed * engine.difficulty) / (dist || 1)) * dt
+          const escape = ((engine.goal.speed * modeConfig.goalSpeedFactor * band.goalSpeedScale * engine.difficulty) / (dist || 1)) * scaledDt
           engine.goal.x += toGoalX * escape
           engine.goal.y += toGoalY * escape
 
@@ -443,21 +746,29 @@ export default function Game() {
           }
         }
 
+        if (dist < band.nearWinDistance && engine.slowMoTimer <= 0 && engine.nearWinLock <= 0) {
+          engine.slowMoTimer = TUNING.feedback.nearWinSlowMoDuration
+          engine.slowMoScale = band.slowMoFactor
+          engine.chromaticFlash = Math.max(engine.chromaticFlash, TUNING.feedback.chromaticFlashNearGoal)
+          engine.fakeUiFlash = Math.max(engine.fakeUiFlash, TUNING.feedback.chromaticFlashNearGoal * effectsScale)
+          engine.nearWinLock = 1.2
+        }
+
         engine.shards = engine.shards.filter((shard) => {
-          shard.age += dt
-          shard.wobble += dt * 5
+          shard.age += scaledDt
+          shard.wobble += scaledDt * 5
           const shardDist = Math.hypot(engine.player.x - shard.x, engine.player.y - shard.y)
           const collected = shardDist < engine.player.radius + shard.radius + 4
 
           if (collected) {
-            engine.score += 45
+            engine.score += TUNING.gameplay.shardPoints
             engine.mission += 1
-            engine.combo = Math.min(8, engine.combo + 1)
+            engine.combo = Math.min(TUNING.gameplay.maxCombo, engine.combo + 1)
             engine.comboTimer = 2.4
             engine.comboBest = Math.max(engine.comboBest, engine.combo)
             engine.warning = 'Data shard collected.'
-            engine.fakeUiFlash = 0.14
-            engine.screenShake = 5
+            engine.fakeUiFlash = 0.14 * effectsScale
+            engine.screenShake = 5 * effectsScale
             playSound('triangle', 980, 0.05, 0.02)
             playNoise(0.02, 0.004)
           }
@@ -466,29 +777,29 @@ export default function Game() {
         })
 
         engine.rifts = engine.rifts.filter((rift) => {
-          rift.age += dt
-          rift.spin += dt * 3
+          rift.age += scaledDt
+          rift.spin += scaledDt * 3
           const active = rift.age < rift.ttl
           const insideRift = Math.hypot(engine.player.x - rift.x, engine.player.y - rift.y) < rift.radius
 
           if (insideRift) {
-            engine.score += dt * 30 * comboMultiplier
+            engine.score += scaledDt * 30 * comboMultiplier
             engine.comboTimer = 1.6
-            engine.combo = Math.min(8, engine.combo + dt * 0.4)
+            engine.combo = Math.min(TUNING.gameplay.maxCombo, engine.combo + scaledDt * 0.4)
             engine.warning = 'Rift boost active.'
-            engine.fakeUiFlash = 0.08
+            engine.fakeUiFlash = 0.08 * effectsScale
           }
 
           return active
         })
 
         if (dist < engine.goal.radius + engine.player.radius + 2) {
-          if (Math.random() < 0.42) {
+          if (Math.random() < modeConfig.fakeWinChance) {
             setFakeOverlay('YOU WIN!')
             setTimeout(() => setFakeOverlay(''), 700)
             engine.goal.x = rand(engine.width * 0.2, engine.width * 0.85)
             engine.goal.y = rand(engine.height * 0.2, engine.height * 0.85)
-            engine.score += 250
+            engine.score += TUNING.gameplay.goalBonusPoints
             engine.warning = 'False alarm. Keep going.'
             playSound('triangle', 860, 0.05, 0.03)
           } else {
@@ -496,26 +807,33 @@ export default function Game() {
           }
         }
 
-        if (engine.wallHits > 2.9) {
+        if (engine.wallHits > modeConfig.wallLimit * band.wallLimitScale) {
           endGame('lose')
         }
 
         if (Math.random() > 0.998) {
           engine.warning = Math.random() > 0.5 ? 'Connection unstable...' : 'Achievement Unlocked: Almost There'
-          engine.fakeUiFlash = 0.25
+          engine.fakeUiFlash = 0.25 * effectsScale
         }
 
         engine.particles = engine.particles.filter((particle) => {
-          particle.age += dt
-          particle.x += particle.vx * dt
-          particle.y += particle.vy * dt
+          particle.age += scaledDt
+          particle.x += particle.vx * scaledDt
+          particle.y += particle.vy * scaledDt
           return particle.age < particle.life
         })
 
-        engine.screenShake = Math.max(0, engine.screenShake - dt * 18)
-        engine.shakeX = rand(-engine.screenShake, engine.screenShake)
-        engine.shakeY = rand(-engine.screenShake, engine.screenShake)
-        engine.fakeUiFlash = Math.max(0, engine.fakeUiFlash - dt)
+        engine.screenShake = Math.max(0, engine.screenShake - scaledDt * 18)
+        engine.shakeX = rand(-engine.screenShake, engine.screenShake) * effectsScale
+        engine.shakeY = rand(-engine.screenShake, engine.screenShake) * effectsScale
+        engine.fakeUiFlash = Math.max(0, engine.fakeUiFlash - scaledDt)
+        engine.chromaticFlash = Math.max(0, engine.chromaticFlash - scaledDt * TUNING.feedback.chromaticFlashDecay)
+        engine.slowMoTimer = Math.max(0, engine.slowMoTimer - dt)
+
+        audio?.updateLayers({
+          intensity: clamp(engine.duration / 90, 0, 1),
+          tension: clamp(1 - dist / TUNING.audio.tensionMaxDistance, 0, 1),
+        })
 
         setHud({
           score: engine.score,
@@ -529,6 +847,8 @@ export default function Game() {
           shardCount: engine.shards.length,
           combo: engine.combo,
           riftCount: engine.rifts.length,
+          wallHits: engine.wallHits,
+          wallLimit: modeConfig.wallLimit * band.wallLimitScale,
           progress: clamp(engine.duration / 90, 0, 1),
           playerX: engine.player.x,
           playerY: engine.player.y,
@@ -609,6 +929,22 @@ export default function Game() {
         ctx.fillRect(0, 0, engine.width, engine.height)
       }
 
+      if (engine.chromaticFlash > 0) {
+        ctx.save()
+        ctx.globalCompositeOperation = 'screen'
+        ctx.globalAlpha = engine.chromaticFlash * 0.3
+        ctx.fillStyle = 'rgba(255, 0, 80, 0.3)'
+        ctx.fillRect(-3, 0, engine.width, engine.height)
+        ctx.fillStyle = 'rgba(0, 255, 255, 0.28)'
+        ctx.fillRect(3, 0, engine.width, engine.height)
+        ctx.globalAlpha = engine.chromaticFlash * 0.55
+        drawGlowCircle(ctx, engine.goal.x - 4, engine.goal.y, engine.goal.radius + 10, 'rgba(255, 64, 128, 0.22)', 18)
+        drawGlowCircle(ctx, engine.goal.x + 4, engine.goal.y, engine.goal.radius + 10, 'rgba(64, 224, 255, 0.22)', 18)
+        drawGlowCircle(ctx, engine.player.x - 3, engine.player.y, engine.player.radius + 8, 'rgba(255, 64, 128, 0.2)', 18)
+        drawGlowCircle(ctx, engine.player.x + 3, engine.player.y, engine.player.radius + 8, 'rgba(64, 224, 255, 0.2)', 18)
+        ctx.restore()
+      }
+
       ctx.restore()
 
       rafRef.current = requestAnimationFrame(loop)
@@ -624,7 +960,7 @@ export default function Game() {
 
   const startGame = () => {
     setPause(false)
-    setRunResult({ score: 0, duration: 0, outcome: 'lose' })
+    setRunResult({ score: 0, duration: 0, outcome: 'lose', reason: '' })
     setScreen('game')
     void audioRef.current?.unlock?.()
     if (engineRef.current?.soundEnabled !== false) {
@@ -647,11 +983,162 @@ export default function Game() {
   const saveScoreAndRefresh = async (payload) => {
     try {
       await saveScore({ ...payload, score: Math.floor(payload.score) })
-      const fresh = await fetchLeaderboard()
-      setLeaderboard(fresh)
+      trackEvent('save_score', {
+        name: payload.name,
+        score: Math.floor(payload.score),
+        duration: Number(payload.duration?.toFixed?.(2) ?? payload.duration),
+        outcome: payload.outcome,
+      })
+      const fresh = await fetchLeaderboardPage({
+        page: 1,
+        limit: leaderboardInfo.limit || 10,
+        name: payload.name,
+      })
+      setLeaderboard(fresh.items)
+      setLeaderboardInfo(fresh)
     } catch {
+      trackEvent('save_score_failed', {
+        name: payload.name,
+        score: Math.floor(payload.score),
+        outcome: payload.outcome,
+      })
       // Ignore temporary network errors to avoid blocking gameplay flow.
     }
+  }
+
+  const changeLeaderboardPage = async (nextPage) => {
+    try {
+      const totalPages = Math.max(1, Math.ceil((leaderboardInfo.total || leaderboard.length || 1) / (leaderboardInfo.limit || 10)))
+      const target = clamp(nextPage, 1, totalPages)
+      const fresh = await fetchLeaderboardPage({
+        page: target,
+        limit: leaderboardInfo.limit || 10,
+      })
+      setLeaderboard(fresh.items)
+      setLeaderboardInfo((prev) => ({ ...fresh, playerRank: prev.playerRank ?? fresh.playerRank }))
+    } catch {
+      // Keep current page on temporary fetch errors.
+    }
+  }
+
+  const updateSetting = (key, value) => {
+    setSettings((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const openMenuPage = (page) => {
+    setScreen(page)
+    setPause(false)
+  }
+
+  const openSettingsPage = (fromScreen) => {
+    const fromGame = fromScreen === 'game'
+    setSettingsBackTarget(fromGame ? 'game' : 'menu')
+    setSettingsBackPause(fromGame ? pause : false)
+    setScreen('settings')
+    setPause(false)
+  }
+
+  const handleSettingsBack = () => {
+    if (settingsBackTarget === 'game') {
+      setScreen('game')
+      setPause(settingsBackPause)
+      return
+    }
+    openMenuPage('menu')
+  }
+
+  const goHomeFromGame = () => {
+    const engine = engineRef.current
+    if (engine && !engine.isGameOver) {
+      trackEvent('rage_quit', {
+        mode: engine.mode,
+        score: Math.floor(engine.score),
+        duration: Number(engine.duration.toFixed(2)),
+      })
+    }
+    resetJoystick()
+    setPause(false)
+    setScreen('menu')
+  }
+
+  const setControlKey = (key, value) => {
+    keysRef.current[key] = value
+  }
+
+  const applyJoystick = (event, moveOnly = false) => {
+    const joystick = joystickRef.current
+    const canvas = event.currentTarget
+    const rect = canvas.getBoundingClientRect()
+    const clientX = event.clientX ?? (event.touches && event.touches[0] ? event.touches[0].clientX : 0)
+    const clientY = event.clientY ?? (event.touches && event.touches[0] ? event.touches[0].clientY : 0)
+    const dx = clientX - joystick.originX
+    const dy = clientY - joystick.originY
+    const distance = Math.hypot(dx, dy)
+    const maxDistance = Math.min(rect.width, rect.height) * 0.4
+    const clamped = Math.min(distance, maxDistance)
+    const angle = Math.atan2(dy, dx)
+    const normalizedX = clamped / maxDistance * Math.cos(angle)
+    const normalizedY = clamped / maxDistance * Math.sin(angle)
+
+    joystick.x = normalizedX
+    joystick.y = normalizedY
+    setJoystickVector({ x: normalizedX, y: normalizedY })
+
+    if (!moveOnly) {
+      if (Math.abs(normalizedX) > 0.2) {
+        setControlKey(normalizedX > 0 ? 'd' : 'a', true)
+        setControlKey(normalizedX > 0 ? 'a' : 'd', false)
+      }
+      if (Math.abs(normalizedY) > 0.2) {
+        setControlKey(normalizedY > 0 ? 's' : 'w', true)
+        setControlKey(normalizedY > 0 ? 'w' : 's', false)
+      }
+    }
+  }
+
+  const resetJoystick = () => {
+    joystickRef.current = { active: false, originX: 0, originY: 0, x: 0, y: 0 }
+    setJoystickVector({ x: 0, y: 0 })
+    setControlKey('w', false)
+    setControlKey('a', false)
+    setControlKey('s', false)
+    setControlKey('d', false)
+  }
+
+  const tapDash = (event) => {
+    event.preventDefault()
+    setControlKey(' ', true)
+    window.setTimeout(() => setControlKey(' ', false), 90)
+  }
+
+  const handleJoystickDown = (event) => {
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    const clientX = event.clientX ?? (event.touches && event.touches[0] ? event.touches[0].clientX : 0)
+    const clientY = event.clientY ?? (event.touches && event.touches[0] ? event.touches[0].clientY : 0)
+    joystickRef.current = {
+      active: true,
+      originX: clientX,
+      originY: clientY,
+      x: 0,
+      y: 0,
+      rect,
+    }
+    setControlKey(' ', false)
+    applyJoystick(event)
+  }
+
+  const handleJoystickMove = (event) => {
+    if (!joystickRef.current.active) {
+      return
+    }
+    event.preventDefault()
+    applyJoystick(event)
+  }
+
+  const handleJoystickUp = (event) => {
+    event.preventDefault()
+    resetJoystick()
   }
 
   if (screen === 'menu') {
@@ -664,6 +1151,10 @@ export default function Game() {
         ) : null}
         <MainMenu
           onStart={startGame}
+          settings={settings}
+          onSettingChange={updateSetting}
+          onOpenTutorial={() => openMenuPage('tutorial')}
+          onOpenSettings={() => openSettingsPage('menu')}
           onQuit={() => {
             setQuitNotice('You cannot quit that easily.')
             setTimeout(() => setQuitNotice(''), 1400)
@@ -673,16 +1164,27 @@ export default function Game() {
     )
   }
 
+  if (screen === 'tutorial') {
+    return <TutorialPage onBack={() => openMenuPage('menu')} />
+  }
+
+  if (screen === 'settings') {
+    return <SettingsPage settings={settings} onSettingChange={updateSetting} onBack={handleSettingsBack} />
+  }
+
   if (screen === 'end') {
     return (
       <GameOverScreen
         score={runResult.score}
         outcome={runResult.outcome}
         duration={runResult.duration}
+        reason={runResult.reason}
         leaderboard={leaderboard}
+        leaderboardInfo={leaderboardInfo}
         onRestart={startGame}
         onBack={() => setScreen('menu')}
         onSaveScore={saveScoreAndRefresh}
+        onPageChange={changeLeaderboardPage}
       />
     )
   }
@@ -698,13 +1200,22 @@ export default function Game() {
                   <p className="font-arcade text-sm text-cyan-100">Almost There OS</p>
                   <p className="mt-1 text-[11px] uppercase tracking-[0.22em] text-slate-400">Run Control Panel</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={toggleSound}
-                  className="rounded-full border border-slate-500/50 bg-slate-900/80 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-100 transition hover:border-cyan-300/60 hover:text-cyan-100"
-                >
-                  {hud.soundEnabled ? 'Sound On' : 'Sound Off'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={goHomeFromGame}
+                    className="rounded-full border border-fuchsia-400/40 bg-fuchsia-500/15 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-fuchsia-100 transition hover:border-fuchsia-300/70 hover:bg-fuchsia-500/25"
+                  >
+                    Home
+                  </button>
+                  <button
+                    type="button"
+                    onClick={toggleSound}
+                    className="rounded-full border border-slate-500/50 bg-slate-900/80 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-100 transition hover:border-cyan-300/60 hover:text-cyan-100"
+                  >
+                    {hud.soundEnabled ? 'Sound On' : 'Sound Off'}
+                  </button>
+                </div>
               </div>
 
               <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-800">
@@ -716,6 +1227,19 @@ export default function Game() {
               <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
                 <span>Mission Progress</span>
                 <span>{Math.round(hud.progress * 100)}%</span>
+              </div>
+
+              <div className="mt-4 grid gap-3 rounded-xl border border-slate-700/80 bg-slate-900/60 p-3">
+                <button
+                  type="button"
+                  onClick={() => openSettingsPage('game')}
+                  className="game-btn border-cyan-300/40 bg-cyan-500/15 text-cyan-100 hover:bg-cyan-500/30"
+                >
+                  Open Settings
+                </button>
+                <p className="text-[11px] text-slate-400">
+                  Tune mode, volume, effects, and sensitivity in the Settings page.
+                </p>
               </div>
             </div>
 
@@ -812,6 +1336,51 @@ export default function Game() {
           </div>
         ) : null}
       </div>
+
+      {showTouchControls ? (
+        <div className="grid w-full gap-3 rounded-2xl border border-cyan-300/25 bg-slate-950/75 p-3 lg:hidden">
+          <p className="text-center text-[11px] uppercase tracking-[0.18em] text-slate-400">Touch Controls</p>
+          <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
+            <div
+              className="relative aspect-square w-full max-w-[220px] justify-self-center rounded-full border border-cyan-300/25 bg-slate-900/60"
+              onPointerDown={handleJoystickDown}
+              onPointerMove={handleJoystickMove}
+              onPointerUp={handleJoystickUp}
+              onPointerLeave={handleJoystickUp}
+              onPointerCancel={handleJoystickUp}
+            >
+              <div className="absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(34,211,238,0.08),transparent_60%)]" />
+              <div className="absolute left-1/2 top-1/2 h-20 w-20 -translate-x-1/2 -translate-y-1/2 rounded-full border border-slate-500 bg-slate-950/80 shadow-[0_0_18px_rgba(34,211,238,0.15)]" />
+              <div
+                className="absolute left-1/2 top-1/2 h-12 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-200/50 bg-cyan-400/60 shadow-[0_0_20px_rgba(34,211,238,0.4)] transition-transform"
+                style={{
+                  transform: `translate(calc(-50% + ${joystickVector.x * 60}px), calc(-50% + ${joystickVector.y * 60}px))`,
+                }}
+              />
+            </div>
+
+            <div className="grid gap-2 self-center sm:justify-self-end">
+              <button
+                type="button"
+                onPointerDown={tapDash}
+                className="rounded-xl border border-amber-300/50 bg-amber-400/15 px-4 py-3 text-sm font-semibold text-amber-100 active:bg-amber-400/35"
+              >
+                Dash
+              </button>
+              <button
+                type="button"
+                onPointerDown={(event) => {
+                  event.preventDefault()
+                  setPause((value) => !value)
+                }}
+                className="rounded-xl border border-slate-500/50 bg-slate-900/80 px-4 py-3 text-sm font-semibold text-slate-100 active:bg-slate-700"
+              >
+                Pause
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }

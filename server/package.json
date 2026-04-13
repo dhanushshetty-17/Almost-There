@@ -6,6 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon index.js",
+    "lint": "node --check index.js && node --check routes/scores.js && node --check routes/analytics.js && node --check models/Score.js",
     "start": "node index.js"
   },
   "keywords": [],

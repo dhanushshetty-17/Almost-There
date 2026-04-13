@@ -3,6 +3,7 @@ import cors from 'cors'
 import express from 'express'
 import mongoose from 'mongoose'
 import scoreRoutes from './routes/scores.js'
+import analyticsRoutes from './routes/analytics.js'
 
 const app = express()
 
@@ -17,14 +18,42 @@ app.use(
 )
 app.use(express.json())
 
+app.use((req, res, next) => {
+  const start = Date.now()
+  res.on('finish', () => {
+    const durationMs = Date.now() - start
+    console.log(`[api] ${req.method} ${req.originalUrl} ${res.statusCode} ${durationMs}ms`)
+  })
+  next()
+})
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'almost-there-api' })
 })
 
 app.use('/api/scores', scoreRoutes)
+app.use('/api/analytics', analyticsRoutes)
 
 app.use((_req, res) => {
   res.status(404).json({ message: 'Route not found.' })
+})
+
+app.use((error, req, res, _next) => {
+  console.error('[api:error]', {
+    method: req.method,
+    url: req.originalUrl,
+    message: error?.message,
+    stack: error?.stack,
+  })
+  res.status(500).json({ message: 'Internal server error.' })
+})
+
+process.on('uncaughtException', (error) => {
+  console.error('[process:uncaughtException]', error)
+})
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[process:unhandledRejection]', reason)
 })
 
 async function start() {

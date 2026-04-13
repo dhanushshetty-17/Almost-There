@@ -1,6 +1,8 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import Game from './Game'
 
+const MotionDiv = motion.div
+
 const shellAnim = {
   initial: { opacity: 0, y: 12 },
   animate: { opacity: 1, y: 0, transition: { duration: 0.35, ease: 'easeOut' } },
@@ -16,9 +18,9 @@ function App() {
       </div>
 
       <AnimatePresence mode="wait">
-        <motion.div key="game-shell" {...shellAnim} className="relative z-10">
+        <MotionDiv key="game-shell" {...shellAnim} className="relative z-10">
           <Game />
-        </motion.div>
+        </MotionDiv>
       </AnimatePresence>
     </main>
   )
