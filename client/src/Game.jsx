@@ -155,6 +155,7 @@ function createAudioEngine(getVolume = () => 1) {
   const audio = new AudioCtx()
   let ambientStarted = false
   let ambientNodes = null
+  let enabled = true
 
   const ensureAmbient = () => {
     if (ambientStarted) {
@@ -222,6 +223,12 @@ function createAudioEngine(getVolume = () => 1) {
       return
     }
 
+    if (!enabled) {
+      nodes.ambientGain.gain.setTargetAtTime(0, audio.currentTime, 0.03)
+      nodes.tensionGain.gain.setTargetAtTime(0, audio.currentTime, 0.03)
+      return
+    }
+
     const volumeScale = getVolume() * TUNING.audio.ambientVolumeScale
     const ambientGainTarget = TUNING.audio.ambientBaseGain * volumeScale
     const tensionGainTarget = Math.min(TUNING.audio.ambientTensionGain + tension * TUNING.audio.tensionNearGain, 0.22) * volumeScale
@@ -234,6 +241,10 @@ function createAudioEngine(getVolume = () => 1) {
   }
 
   const trigger = (type = 'square', frequency = 440, duration = 0.06, gainValue = 0.02, glide = 0) => {
+    if (!enabled) {
+      return
+    }
+
     const oscillator = audio.createOscillator()
     const gain = audio.createGain()
 
@@ -253,6 +264,10 @@ function createAudioEngine(getVolume = () => 1) {
   }
 
   const noiseBurst = (duration = 0.05, gainValue = 0.025) => {
+    if (!enabled) {
+      return
+    }
+
     const buffer = audio.createBuffer(1, audio.sampleRate * duration, audio.sampleRate)
     const data = buffer.getChannelData(0)
     for (let i = 0; i < data.length; i += 1) {
@@ -275,6 +290,26 @@ function createAudioEngine(getVolume = () => 1) {
     trigger,
     noiseBurst,
     updateLayers,
+    setEnabled: (value) => {
+      enabled = Boolean(value)
+      if (!enabled) {
+        const nodes = ensureAmbient()
+        if (nodes) {
+          nodes.ambientGain.gain.setTargetAtTime(0, audio.currentTime, 0.02)
+          nodes.tensionGain.gain.setTargetAtTime(0, audio.currentTime, 0.02)
+        }
+      }
+    },
+    suspend: async () => {
+      if (audio.state === 'running') {
+        await audio.suspend()
+      }
+    },
+    resume: async () => {
+      if (audio.state !== 'running') {
+        await audio.resume()
+      }
+    },
     unlock: async () => {
       if (audio.state !== 'running') {
         await audio.resume()
@@ -452,6 +487,7 @@ export default function Game() {
     playerRank: null,
   })
   const [settings, setSettings] = useState(DEFAULT_SETTINGS)
+  const [soundEnabled, setSoundEnabled] = useState(true)
   const [settingsBackTarget, setSettingsBackTarget] = useState('menu')
   const [settingsBackPause, setSettingsBackPause] = useState(false)
   const [pause, setPause] = useState(false)
@@ -513,6 +549,45 @@ export default function Game() {
   }, [])
 
   useEffect(() => {
+    const audio = audioRef.current
+    if (!audio) {
+      return undefined
+    }
+
+    const active = screen === 'game' && soundEnabled
+    audio.setEnabled?.(active)
+    if (active) {
+      void audio.resume?.()
+    } else {
+      void audio.suspend?.()
+    }
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        void audio.suspend?.()
+        return
+      }
+      if (screen === 'game' && soundEnabled) {
+        void audio.resume?.()
+      }
+    }
+
+    const onPageExit = () => {
+      void audio.suspend?.()
+    }
+
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', onPageExit)
+    window.addEventListener('beforeunload', onPageExit)
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', onPageExit)
+      window.removeEventListener('beforeunload', onPageExit)
+    }
+  }, [screen, soundEnabled])
+
+  useEffect(() => {
     const onKeyDown = (event) => {
       const key = event.key.toLowerCase()
 
@@ -551,6 +626,7 @@ export default function Game() {
     const size = resizeCanvas(canvas)
 
     const engine = initialEngine(size.width, size.height, settingsRef.current.mode)
+    engine.soundEnabled = soundEnabled
     engineRef.current = engine
 
     const audio = audioRef.current
@@ -603,6 +679,11 @@ export default function Game() {
         })
         .catch(() => undefined)
       playSound(outcome === 'win' ? 'triangle' : 'sawtooth', outcome === 'win' ? 720 : 180, 0.12, 0.04)
+      if (outcome === 'win') {
+        playSound('sine', 980, 0.09, 0.028)
+      } else {
+        playSound('square', 130, 0.1, 0.02, -45)
+      }
     }
 
     const spawnShard = () => {
@@ -678,6 +759,7 @@ export default function Game() {
             engine.screenShake = 16 * effectsScale
             engine.chromaticFlash = Math.max(engine.chromaticFlash, TUNING.feedback.chromaticFlashWallHit)
             playSound('square', 160, 0.08, 0.03)
+            playSound('triangle', 420, 0.06, 0.018, 120)
             playNoise(0.04, 0.01)
             keysRef.current[' '] = false
           }
@@ -785,6 +867,7 @@ export default function Game() {
             engine.fakeUiFlash = 0.14 * effectsScale
             engine.screenShake = 5 * effectsScale
             playSound('triangle', 980, 0.05, 0.02)
+            playSound('sine', 1240, 0.04, 0.014)
             playNoise(0.02, 0.004)
           }
 
@@ -817,6 +900,7 @@ export default function Game() {
             engine.score += TUNING.gameplay.goalBonusPoints
             engine.warning = 'False alarm. Keep going.'
             playSound('triangle', 860, 0.05, 0.03)
+            playSound('sine', 1120, 0.035, 0.016)
           } else {
             endGame('win')
           }
@@ -971,28 +1055,33 @@ export default function Game() {
       cancelAnimationFrame(rafRef.current)
       window.removeEventListener('resize', onResize)
     }
-  }, [screen, pause, bgGradient])
+  }, [screen, pause, bgGradient, soundEnabled])
 
   const startGame = () => {
     setPause(false)
     setRunResult({ score: 0, duration: 0, outcome: 'lose', reason: '' })
     setScreen('game')
     void audioRef.current?.unlock?.()
-    if (engineRef.current?.soundEnabled !== false) {
+    if (soundEnabled) {
       audioRef.current?.trigger('triangle', 520, 0.06, 0.025)
     }
   }
 
   const toggleSound = () => {
-    const engine = engineRef.current
-    if (engine) {
-      engine.soundEnabled = !engine.soundEnabled
-      setHud((prev) => ({ ...prev, soundEnabled: engine.soundEnabled }))
-      if (engine.soundEnabled) {
+    setSoundEnabled((prev) => {
+      const next = !prev
+      const engine = engineRef.current
+      if (engine) {
+        engine.soundEnabled = next
+      }
+      setHud((prev) => ({ ...prev, soundEnabled: next }))
+      audioRef.current?.setEnabled?.(next && screen === 'game')
+      if (next) {
         void audioRef.current?.unlock?.()
         audioRef.current?.trigger('triangle', 740, 0.05, 0.02)
       }
-    }
+      return next
+    })
   }
 
   const saveScoreAndRefresh = async (payload) => {
