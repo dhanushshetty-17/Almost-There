@@ -15,6 +15,7 @@ export default function GameOverScreen({
   const [name, setName] = useState('')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState('')
 
   const submit = async (event) => {
     event.preventDefault()
@@ -23,14 +24,20 @@ export default function GameOverScreen({
     }
 
     setSaving(true)
-    await onSaveScore({
-      name: name.trim().slice(0, 16),
-      score,
-      outcome,
-      duration,
-    })
-    setSaving(false)
-    setSaved(true)
+    setSaveError('')
+    try {
+      await onSaveScore({
+        name: name.trim().slice(0, 16),
+        score,
+        outcome,
+        duration,
+      })
+      setSaved(true)
+    } catch (error) {
+      setSaveError(error?.message || 'Could not save score. Try again.')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const title = outcome === 'win' ? 'You Actually Won' : 'Game Over'
@@ -65,7 +72,12 @@ export default function GameOverScreen({
           <form onSubmit={submit} className="mt-6 flex flex-col gap-3 sm:flex-row">
             <input
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                setName(event.target.value)
+                if (saveError) {
+                  setSaveError('')
+                }
+              }}
               maxLength={16}
               placeholder="Name for leaderboard"
               className="h-11 flex-1 rounded-xl border border-slate-600 bg-slate-900 px-3 text-slate-100 outline-none focus:border-cyan-300"
@@ -78,6 +90,7 @@ export default function GameOverScreen({
               {saved ? 'Saved' : saving ? 'Saving...' : 'Save Score'}
             </button>
           </form>
+          {saveError ? <p className="mt-2 text-sm text-rose-300">{saveError}</p> : null}
 
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
             <button

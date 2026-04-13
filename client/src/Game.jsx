@@ -389,7 +389,16 @@ async function saveScore(payload) {
   })
 
   if (!response.ok) {
-    throw new Error('Could not save score')
+    let message = 'Could not save score'
+    try {
+      const errorPayload = await response.json()
+      if (errorPayload?.message) {
+        message = errorPayload.message
+      }
+    } catch {
+      // Keep fallback message when response body is not JSON.
+    }
+    throw new Error(message)
   }
 
   return response.json()
@@ -446,7 +455,7 @@ export default function Game() {
     typeof window !== 'undefined' ? window.matchMedia('(max-width: 900px)').matches : false,
   )
   const [joystickVector, setJoystickVector] = useState({ x: 0, y: 0 })
-  const joystickRef = useRef({ active: false, originX: 0, originY: 0, x: 0, y: 0 })
+  const joystickRef = useRef({ active: false, originX: 0, originY: 0, x: 0, y: 0, rect: null, pointerId: null })
 
   const bgGradient = useMemo(
     () => ['#050611', '#080f26', '#101033', '#180c2b'],
@@ -996,13 +1005,14 @@ export default function Game() {
       })
       setLeaderboard(fresh.items)
       setLeaderboardInfo(fresh)
-    } catch {
+    } catch (error) {
       trackEvent('save_score_failed', {
         name: payload.name,
         score: Math.floor(payload.score),
         outcome: payload.outcome,
+        message: error?.message || 'unknown error',
       })
-      // Ignore temporary network errors to avoid blocking gameplay flow.
+      throw error
     }
   }
 
@@ -1065,12 +1075,31 @@ export default function Game() {
     keysRef.current[key] = value
   }
 
-  const applyJoystick = (event, moveOnly = false) => {
+  const getEventPoint = (event) => {
+    if (event.touches && event.touches.length > 0) {
+      return {
+        x: event.touches[0].clientX,
+        y: event.touches[0].clientY,
+      }
+    }
+    if (event.changedTouches && event.changedTouches.length > 0) {
+      return {
+        x: event.changedTouches[0].clientX,
+        y: event.changedTouches[0].clientY,
+      }
+    }
+    return {
+      x: event.clientX ?? 0,
+      y: event.clientY ?? 0,
+    }
+  }
+
+  const applyJoystickPoint = (clientX, clientY, moveOnly = false) => {
     const joystick = joystickRef.current
-    const canvas = event.currentTarget
-    const rect = canvas.getBoundingClientRect()
-    const clientX = event.clientX ?? (event.touches && event.touches[0] ? event.touches[0].clientX : 0)
-    const clientY = event.clientY ?? (event.touches && event.touches[0] ? event.touches[0].clientY : 0)
+    const rect = joystick.rect
+    if (!rect) {
+      return
+    }
     const dx = clientX - joystick.originX
     const dy = clientY - joystick.originY
     const distance = Math.hypot(dx, dy)
@@ -1097,7 +1126,7 @@ export default function Game() {
   }
 
   const resetJoystick = () => {
-    joystickRef.current = { active: false, originX: 0, originY: 0, x: 0, y: 0 }
+    joystickRef.current = { active: false, originX: 0, originY: 0, x: 0, y: 0, rect: null, pointerId: null }
     setJoystickVector({ x: 0, y: 0 })
     setControlKey('w', false)
     setControlKey('a', false)
@@ -1114,18 +1143,23 @@ export default function Game() {
   const handleJoystickDown = (event) => {
     event.preventDefault()
     const rect = event.currentTarget.getBoundingClientRect()
-    const clientX = event.clientX ?? (event.touches && event.touches[0] ? event.touches[0].clientX : 0)
-    const clientY = event.clientY ?? (event.touches && event.touches[0] ? event.touches[0].clientY : 0)
+    const point = getEventPoint(event)
     joystickRef.current = {
       active: true,
-      originX: clientX,
-      originY: clientY,
+      originX: point.x,
+      originY: point.y,
       x: 0,
       y: 0,
       rect,
+      pointerId: event.pointerId,
+    }
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId)
+    } catch {
+      // Ignore pointer capture failures on unsupported browsers.
     }
     setControlKey(' ', false)
-    applyJoystick(event)
+    applyJoystickPoint(point.x, point.y)
   }
 
   const handleJoystickMove = (event) => {
@@ -1133,7 +1167,8 @@ export default function Game() {
       return
     }
     event.preventDefault()
-    applyJoystick(event)
+    const point = getEventPoint(event)
+    applyJoystickPoint(point.x, point.y)
   }
 
   const handleJoystickUp = (event) => {
@@ -1343,11 +1378,16 @@ export default function Game() {
           <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
             <div
               className="relative aspect-square w-full max-w-[220px] justify-self-center rounded-full border border-cyan-300/25 bg-slate-900/60"
+              style={{ touchAction: 'none' }}
               onPointerDown={handleJoystickDown}
               onPointerMove={handleJoystickMove}
               onPointerUp={handleJoystickUp}
               onPointerLeave={handleJoystickUp}
               onPointerCancel={handleJoystickUp}
+              onTouchStart={handleJoystickDown}
+              onTouchMove={handleJoystickMove}
+              onTouchEnd={handleJoystickUp}
+              onTouchCancel={handleJoystickUp}
             >
               <div className="absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(34,211,238,0.08),transparent_60%)]" />
               <div className="absolute left-1/2 top-1/2 h-20 w-20 -translate-x-1/2 -translate-y-1/2 rounded-full border border-slate-500 bg-slate-950/80 shadow-[0_0_18px_rgba(34,211,238,0.15)]" />
