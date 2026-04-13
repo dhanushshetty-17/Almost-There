@@ -1,0 +1,27 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Almost There Client",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"client"
+			],
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Run Almost There Server",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"server"
+			],
+			"isBackground": true,
+			"group": "build"
+		}
+	]
+}
